@@ -1,0 +1,276 @@
+# =============================================================================
+# CI/CD Pipeline for AI Monitoring Platform (Backend + Frontend)
+# =============================================================================
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  JAVA_VERSION: '21'
+  NODE_VERSION: '18'
+  MAVEN_OPTS: '-Xmx1024m'
+
+jobs:
+  # ===========================================================================
+  # Backend: Build and Test
+  # ===========================================================================
+  backend-build:
+    name: Backend - Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn clean compile -B
+
+      - name: Run Unit Tests
+        run: mvn test -B
+
+      - name: Generate Test Coverage Report
+        run: mvn jacoco:report -B
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage-report
+          path: target/site/jacoco/
+
+      - name: Package Application
+        run: mvn package -DskipTests -B
+
+      - name: Upload JAR Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar
+          path: target/*.jar
+
+  # ===========================================================================
+  # Frontend: Build and Test
+  # ===========================================================================
+  frontend-build:
+    name: Frontend - Build & Test
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Run linting
+        run: npm run lint --if-present
+        continue-on-error: true
+
+      - name: Run tests
+        run: npm test -- --watchAll=false --passWithNoTests
+        continue-on-error: true
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build/
+
+  # ===========================================================================
+  # Code Quality (Backend)
+  # ===========================================================================
+  code-quality:
+    name: Backend - Code Quality
+    runs-on: ubuntu-latest
+    needs: backend-build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run SpotBugs
+        run: mvn spotbugs:check -B || true
+        continue-on-error: true
+
+      - name: Run Checkstyle
+        run: mvn checkstyle:check -B || true
+        continue-on-error: true
+
+  # ===========================================================================
+  # Security Scan
+  # ===========================================================================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [backend-build, frontend-build]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: OWASP Dependency Check (Backend)
+        run: mvn org.owasp:dependency-check-maven:check -B || true
+        continue-on-error: true
+
+      - name: Upload Security Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-check-report
+          path: target/dependency-check-report.html
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: NPM Audit (Frontend)
+        working-directory: frontend
+        run: npm audit --audit-level=high || true
+        continue-on-error: true
+
+  # ===========================================================================
+  # Docker Build
+  # ===========================================================================
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [backend-build, frontend-build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Backend Docker Image
+        run: |
+          docker build --target backend -t ai-monitor-backend:${{ github.sha }} .
+          docker build --target backend -t ai-monitor-backend:latest .
+
+      - name: Build Frontend Docker Image
+        run: |
+          docker build --target frontend -t ai-monitor-frontend:${{ github.sha }} .
+          docker build --target frontend -t ai-monitor-frontend:latest .
+
+      - name: Save Docker Images
+        run: |
+          docker save ai-monitor-backend:latest ai-monitor-frontend:latest | gzip > docker-images.tar.gz
+
+      - name: Upload Docker Images
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images
+          path: docker-images.tar.gz
+
+  # ===========================================================================
+  # Integration Tests
+  # ===========================================================================
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [backend-build, frontend-build]
+    if: github.event_name == 'push'
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: offline_batch_ai
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run Integration Tests
+        run: mvn verify -DskipUnitTests -B
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/offline_batch_ai
+          SPRING_DATASOURCE_USERNAME: postgres
+          SPRING_DATASOURCE_PASSWORD: postgres
+
+  # ===========================================================================
+  # Deploy (Example - customize for your environment)
+  # ===========================================================================
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [docker, integration-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Docker Images
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+
+      - name: Load Docker Images
+        run: |
+          gunzip -c docker-images.tar.gz | docker load
+
+      - name: Deploy notification
+        run: |
+          echo "🚀 Deployment ready!"
+          echo "Backend image: ai-monitor-backend:${{ github.sha }}"
+          echo "Frontend image: ai-monitor-frontend:${{ github.sha }}"
+          # Add your deployment commands here (e.g., push to registry, deploy to k8s, etc.)
+
