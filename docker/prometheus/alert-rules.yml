@@ -1,0 +1,221 @@
+# Prometheus Alert Rules for Offline Batch AI Monitoring
+# =============================================================================
+
+groups:
+  # ===========================================================================
+  # Application Health Alerts
+  # ===========================================================================
+  - name: application_health
+    rules:
+      - alert: ApplicationDown
+        expr: up{job="offline-batch-ai-monitoring"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Application {{ $labels.instance }} is down"
+          description: "The Offline Batch AI Monitoring application has been down for more than 1 minute."
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m])) 
+          / sum(rate(http_server_requests_seconds_count[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High HTTP error rate detected"
+          description: "Error rate is above 5% for the last 5 minutes. Current: {{ $value | humanizePercentage }}"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High request latency detected"
+          description: "95th percentile latency is above 2 seconds. Current: {{ $value | humanizeDuration }}"
+
+  # ===========================================================================
+  # AI Service Alerts
+  # ===========================================================================
+  - name: ai_service
+    rules:
+      - alert: AIServiceHighLatency
+        expr: |
+          histogram_quantile(0.95, sum(rate(ai_prediction_latency_seconds_bucket[5m])) by (le)) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI prediction latency is high"
+          description: "95th percentile AI prediction latency is above 10 seconds."
+
+      - alert: AIServiceHighFailureRate
+        expr: |
+          sum(rate(ai_predictions_failure_total[5m])) 
+          / sum(rate(ai_predictions_requests_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI prediction failure rate is high"
+          description: "AI prediction failure rate is above 10%. Current: {{ $value | humanizePercentage }}"
+
+      - alert: AIServiceCircuitBreakerOpen
+        expr: ai_circuit_breaker_open_total > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AI service circuit breaker is open"
+          description: "The circuit breaker for the AI service has opened, indicating service degradation."
+
+      - alert: AIServiceDailyRequestLimitApproaching
+        expr: ai_requests_daily / 1000 > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI daily request limit approaching"
+          description: "Daily AI request count is above 80% of the limit. Current: {{ $value }}%"
+
+      - alert: AIServiceTokenUsageHigh
+        expr: rate(ai_tokens_used_total[1h]) > 10000
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High AI token usage detected"
+          description: "Token usage rate is above 10,000 tokens per hour."
+
+  # ===========================================================================
+  # JVM Metrics Alerts
+  # ===========================================================================
+  - name: jvm_metrics
+    rules:
+      - alert: HighHeapUsage
+        expr: |
+          jvm_memory_used_bytes{area="heap"} 
+          / jvm_memory_max_bytes{area="heap"} > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "JVM heap usage is high"
+          description: "JVM heap usage is above 85%. Current: {{ $value | humanizePercentage }}"
+
+      - alert: HighGCTime
+        expr: |
+          rate(jvm_gc_pause_seconds_sum[5m]) 
+          / rate(jvm_gc_pause_seconds_count[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High GC pause time detected"
+          description: "Average GC pause time is above 500ms."
+
+      - alert: ThreadPoolExhaustion
+        expr: |
+          executor_pool_size_threads{name="applicationTaskExecutor"} 
+          / executor_pool_max_threads{name="applicationTaskExecutor"} > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Thread pool near exhaustion"
+          description: "Application thread pool is above 90% utilized."
+
+  # ===========================================================================
+  # Database Alerts
+  # ===========================================================================
+  - name: database
+    rules:
+      - alert: DatabaseConnectionPoolExhaustion
+        expr: |
+          hikaricp_connections_active 
+          / hikaricp_connections_max > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database connection pool near exhaustion"
+          description: "HikariCP connection pool is above 85% utilized."
+
+      - alert: DatabaseSlowQueries
+        expr: |
+          histogram_quantile(0.95, sum(rate(spring_data_repository_invocations_seconds_bucket[5m])) by (le)) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow database queries detected"
+          description: "95th percentile query time is above 1 second."
+
+  # ===========================================================================
+  # Batch Processing Alerts
+  # ===========================================================================
+  - name: batch_processing
+    rules:
+      - alert: BatchProcessingErrors
+        expr: increase(batch_metrics_error_count_total[1h]) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High batch processing error count"
+          description: "More than 100 batch processing errors in the last hour."
+
+      - alert: BatchProcessingSlowdown
+        expr: |
+          avg(batch_metrics_processing_time_ms) > 5000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Batch processing slowdown detected"
+          description: "Average batch processing time is above 5 seconds."
+
+  # ===========================================================================
+  # Cache Alerts
+  # ===========================================================================
+  - name: cache
+    rules:
+      - alert: CacheLowHitRate
+        expr: |
+          sum(rate(ai_cache_hits_total[5m])) 
+          / (sum(rate(ai_cache_hits_total[5m])) + sum(rate(ai_cache_misses_total[5m]))) < 0.5
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Cache hit rate is low"
+          description: "Cache hit rate is below 50%, consider reviewing cache configuration."
+
+  # ===========================================================================
+  # Resilience Alerts
+  # ===========================================================================
+  - name: resilience
+    rules:
+      - alert: HighRetryRate
+        expr: |
+          sum(rate(resilience4j_retry_calls_total{kind="successful_with_retry"}[5m])) 
+          / sum(rate(resilience4j_retry_calls_total[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High retry rate detected"
+          description: "More than 20% of calls require retries."
+
+      - alert: BulkheadRejections
+        expr: increase(resilience4j_bulkhead_calls_total{kind="rejected"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Bulkhead rejecting requests"
+          description: "Bulkhead is rejecting requests, indicating system overload."
+

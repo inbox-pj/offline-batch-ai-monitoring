@@ -1,0 +1,105 @@
+# Alertmanager Configuration for Offline Batch AI Monitoring
+# =============================================================================
+
+global:
+  # The smarthost and SMTP sender used for mail notifications
+  smtp_smarthost: 'localhost:25'
+  smtp_from: 'alertmanager@offline-batch-ai.local'
+  smtp_require_tls: false
+
+  # Slack API URL (configure if using Slack)
+  # slack_api_url: 'https://hooks.slack.com/services/XXX/YYY/ZZZ'
+
+# Route tree
+route:
+  # Default receiver
+  receiver: 'default-receiver'
+
+  # Group alerts by these labels
+  group_by: ['alertname', 'severity', 'job']
+
+  # Wait before sending a notification for a group
+  group_wait: 30s
+
+  # Wait before sending notifications about new alerts in a group
+  group_interval: 5m
+
+  # Wait before resending a notification
+  repeat_interval: 4h
+
+  # Child routes for specific alert handling
+  routes:
+    # Critical alerts - immediate notification
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      group_wait: 10s
+      repeat_interval: 1h
+
+    # Warning alerts
+    - match:
+        severity: warning
+      receiver: 'warning-alerts'
+      group_wait: 1m
+      repeat_interval: 4h
+
+    # AI-specific alerts
+    - match_re:
+        alertname: '^AI.*'
+      receiver: 'ai-alerts'
+      group_wait: 30s
+      repeat_interval: 2h
+
+# Inhibition rules to suppress alerts
+inhibit_rules:
+  # If ApplicationDown is firing, suppress other alerts from the same instance
+  - source_match:
+      alertname: 'ApplicationDown'
+    target_match_re:
+      alertname: '.*'
+    equal: ['instance']
+
+  # If critical, suppress warning from the same alertname
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname']
+
+# Receivers configuration
+receivers:
+  - name: 'default-receiver'
+    # Webhook configuration (for custom integrations)
+    webhook_configs:
+      - url: 'http://app:8080/api/v1/webhooks/alerts'
+        send_resolved: true
+
+  - name: 'critical-alerts'
+    webhook_configs:
+      - url: 'http://app:8080/api/v1/webhooks/alerts'
+        send_resolved: true
+    # Email configuration (uncomment and configure as needed)
+    # email_configs:
+    #   - to: 'oncall@company.com'
+    #     send_resolved: true
+
+  - name: 'warning-alerts'
+    webhook_configs:
+      - url: 'http://app:8080/api/v1/webhooks/alerts'
+        send_resolved: true
+
+  - name: 'ai-alerts'
+    webhook_configs:
+      - url: 'http://app:8080/api/v1/webhooks/alerts'
+        send_resolved: true
+    # Slack configuration (uncomment and configure as needed)
+    # slack_configs:
+    #   - channel: '#ai-monitoring'
+    #     send_resolved: true
+    #     title: '{{ .GroupLabels.alertname }}'
+    #     text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+# Templates for notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+

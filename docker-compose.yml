@@ -1,0 +1,213 @@
+# =============================================================================
+# Docker Compose - AI Monitoring Platform
+# =============================================================================
+# Usage:
+#   docker-compose up                    # Start all services
+#   docker-compose up -d                 # Start in detached mode
+#   docker-compose up --build            # Rebuild and start
+#   docker-compose --profile with-ollama up  # Include local AI server
+#   docker-compose down -v               # Stop and remove volumes
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ============================================================================
+  # DATABASE
+  # ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai-monitor-postgres
+    environment:
+      POSTGRES_DB: offline_batch_ai
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai-monitor-network
+
+  # ============================================================================
+  # BACKEND API (Spring Boot)
+  # ============================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    container_name: ai-monitor-backend
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      # Database
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/offline_batch_ai
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      # AI
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      AI_PREDICTION_ENABLED: ${AI_PREDICTION_ENABLED:-true}
+      # Observability
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+      OTEL_SERVICE_NAME: ai-monitor-backend
+      METRICS_ENV: docker
+      TRACING_ENABLED: "true"
+      TRACING_SAMPLE_PROBABILITY: "1.0"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    networks:
+      - ai-monitor-network
+    restart: unless-stopped
+    labels:
+      - "prometheus.io/scrape=true"
+      - "prometheus.io/port=8080"
+      - "prometheus.io/path=/actuator/prometheus"
+
+  # ============================================================================
+  # FRONTEND DASHBOARD (React + Nginx)
+  # ============================================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    container_name: ai-monitor-frontend
+    ports:
+      - "3001:3001"
+    depends_on:
+      - backend
+    networks:
+      - ai-monitor-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # OBSERVABILITY STACK
+  # ============================================================================
+
+  # Prometheus - Metrics Collection & Alerting
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: ai-monitor-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - ai-monitor-network
+    restart: unless-stopped
+
+  # Alertmanager - Alert Routing & Notifications
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ai-monitor-alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./docker/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    networks:
+      - ai-monitor-network
+    restart: unless-stopped
+
+  # Grafana - Visualization & Dashboards
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: ai-monitor-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-piechart-panel
+      - GF_UNIFIED_ALERTING_ENABLED=true
+      - GF_ALERTING_ENABLED=false
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - jaeger
+    networks:
+      - ai-monitor-network
+    restart: unless-stopped
+
+  # Jaeger - Distributed Tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    container_name: ai-monitor-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - LOG_LEVEL=info
+    ports:
+      - "5775:5775/udp"   # Agent - Zipkin Thrift (deprecated)
+      - "6831:6831/udp"   # Agent - Jaeger Thrift compact
+      - "6832:6832/udp"   # Agent - Jaeger Thrift binary
+      - "5778:5778"       # Agent - configs
+      - "16686:16686"     # UI
+      - "14250:14250"     # gRPC collector
+      - "14268:14268"     # HTTP collector (Thrift)
+      - "14269:14269"     # Admin port
+      - "4317:4317"       # OTLP gRPC receiver
+      - "4318:4318"       # OTLP HTTP receiver
+    networks:
+      - ai-monitor-network
+    restart: unless-stopped
+
+  # Ollama - Local AI Model Server (optional)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai-monitor-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - ai-monitor-network
+    restart: unless-stopped
+    profiles:
+      - with-ollama
+
+# ============================================================================
+# VOLUMES
+# ============================================================================
+volumes:
+  postgres_data:
+  prometheus_data:
+  alertmanager_data:
+  grafana_data:
+  ollama_data:
+
+# ============================================================================
+# NETWORKS
+# ============================================================================
+networks:
+  ai-monitor-network:
+    driver: bridge
+
