@@ -80,7 +80,7 @@ jobs:
       - name: Clean node_modules and reinstall
         run: |
           rm -rf node_modules
-          npm ci --legacy-peer-deps
+          npm install --legacy-peer-deps
 
       - name: Run linting
         run: npm run lint --if-present
