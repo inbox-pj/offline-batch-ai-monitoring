@@ -88,7 +88,7 @@ jobs:
       - name: Clean install dependencies
         run: |
           rm -rf node_modules package-lock.json
-          npm install --legacy-peer-deps
+          npm install --legacy-peer-deps --loglevel=error
 
       - name: Run linting
         run: npm run lint --if-present
