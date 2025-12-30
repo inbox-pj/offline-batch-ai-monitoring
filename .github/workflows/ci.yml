@@ -77,18 +77,10 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Cache npm dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-
-      - name: Clean install dependencies
+      - name: Clean node_modules and reinstall
         run: |
-          rm -rf node_modules package-lock.json
-          npm install --legacy-peer-deps --loglevel=error
+          rm -rf node_modules
+          npm ci --legacy-peer-deps
 
       - name: Run linting
         run: npm run lint --if-present
@@ -102,7 +94,6 @@ jobs:
         run: npm run build
         env:
           DISABLE_ESLINT_PLUGIN: true
-          TSC_COMPILE_ON_ERROR: true
           CI: false
 
       - name: Upload build artifact
